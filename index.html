@@ -1,0 +1,596 @@
+import React, { useState, useEffect, useMemo, useCallback } from "react";
+import {
+  Wrench, Plus, Lock, Unlock, Clock, Building2, User, Search,
+  Trash2, CheckCircle2, AlertCircle, Calendar, ClipboardList,
+  ChevronRight, X, ArrowRight, Hash, FileText,
+} from "lucide-react";
+
+/* ----------------------------------------------------------------
+   Configuração
+----------------------------------------------------------------- */
+const ACCESS_CODE = "7321"; // código do painel de gestão (pode ser alterado)
+
+const STATUSES = [
+  { key: "recebido",   label: "Recebido",            color: "#737373" },
+  { key: "analise",    label: "Em análise",          color: "#2563eb" },
+  { key: "aceite",     label: "Aceite",              color: "#0891b2" },
+  { key: "andamento",  label: "Em andamento",        color: "#d9480f" },
+  { key: "diretoria",  label: "Aprovação diretoria", color: "#7c3aed" },
+  { key: "finalizado", label: "Finalizado",          color: "#15803d" },
+];
+const statusInfo = (k) => STATUSES.find((s) => s.key === k) || STATUSES[0];
+const statusIndex = (k) => STATUSES.findIndex((s) => s.key === k);
+
+/* ----------------------------------------------------------------
+   Camada de armazenamento (persistente + fallback em memória)
+----------------------------------------------------------------- */
+const mem = new Map();
+const hasStore = typeof window !== "undefined" && window.storage;
+
+async function storeList() {
+  if (hasStore) {
+    try {
+      const r = await window.storage.list("req:", true);
+      const keys = (r && r.keys) || [];
+      const out = [];
+      for (const k of keys) {
+        try {
+          const v = await window.storage.get(k, true);
+          if (v && v.value) out.push(JSON.parse(v.value));
+        } catch { /* chave ausente */ }
+      }
+      return out;
+    } catch { /* cai pro fallback */ }
+  }
+  return Array.from(mem.values()).map((v) => JSON.parse(v));
+}
+async function storeSet(id, obj) {
+  const val = JSON.stringify(obj);
+  if (hasStore) {
+    try { await window.storage.set("req:" + id, val, true); return; } catch { /* fallback */ }
+  }
+  mem.set("req:" + id, val);
+}
+async function storeDel(id) {
+  if (hasStore) {
+    try { await window.storage.delete("req:" + id, true); return; } catch { /* fallback */ }
+  }
+  mem.delete("req:" + id);
+}
+
+/* ----------------------------------------------------------------
+   Estilos globais (fontes, grid, animações)
+----------------------------------------------------------------- */
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Archivo:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap');
+
+.mnt-root *{box-sizing:border-box;}
+.mnt-root{
+  font-family:'Archivo',sans-serif;
+  color:#1c1917;
+  background-color:#f0ece1;
+  background-image:
+    linear-gradient(#0000000a 1px,transparent 1px),
+    linear-gradient(90deg,#0000000a 1px,transparent 1px);
+  background-size:26px 26px;
+  min-height:100%;
+}
+.mnt-display{font-family:'Bricolage Grotesque',sans-serif;}
+.mnt-mono{font-family:'JetBrains Mono',monospace;}
+
+.mnt-btn{cursor:pointer;border:none;font-family:'Archivo',sans-serif;transition:transform .12s ease,box-shadow .12s ease,background-color .15s ease;}
+.mnt-btn:active{transform:translateY(1px);}
+.mnt-card{animation:rise .45s cubic-bezier(.2,.8,.2,1) backwards;}
+@keyframes rise{from{opacity:0;transform:translateY(14px);}to{opacity:1;transform:none;}}
+@keyframes pop{from{opacity:0;transform:scale(.96);}to{opacity:1;transform:none;}}
+
+.mnt-input{
+  width:100%;font-family:'Archivo',sans-serif;font-size:15px;color:#1c1917;
+  background:#fbfaf6;border:1.5px solid #d8d2c4;border-radius:9px;padding:11px 13px;outline:none;
+  transition:border-color .15s ease,box-shadow .15s ease;
+}
+.mnt-input:focus{border-color:#d9480f;box-shadow:0 0 0 3px #d9480f22;}
+.mnt-input::placeholder{color:#a8a297;}
+
+.mnt-chip{transition:background-color .15s ease,color .15s ease,border-color .15s ease;}
+.mnt-tab{transition:color .15s ease;}
+.mnt-link:hover{text-decoration:underline;}
+.mnt-step{transition:all .2s ease;}
+.mnt-statusbtn:hover{filter:brightness(1.06);}
+`;
+
+/* ----------------------------------------------------------------
+   Componentes auxiliares
+----------------------------------------------------------------- */
+function StatusBadge({ status, small }) {
+  const s = statusInfo(status);
+  return (
+    <span
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6,
+        background: s.color + "1a", color: s.color,
+        border: `1px solid ${s.color}40`, borderRadius: 999,
+        padding: small ? "3px 9px" : "5px 12px",
+        fontSize: small ? 11 : 12, fontWeight: 600, letterSpacing: .2,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span style={{ width: 7, height: 7, borderRadius: 999, background: s.color }} />
+      {s.label}
+    </span>
+  );
+}
+
+function Stepper({ status }) {
+  const idx = statusIndex(status);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+      {STATUSES.map((s, i) => {
+        const done = i <= idx;
+        return (
+          <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <div
+              className="mnt-step"
+              title={s.label}
+              style={{
+                width: 22, height: 22, borderRadius: 999,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: done ? s.color : "#e7e2d6",
+                color: done ? "#fff" : "#a8a297",
+                fontSize: 10, fontWeight: 700, fontFamily: "'JetBrains Mono',monospace",
+              }}
+            >
+              {i + 1}
+            </div>
+            {i < STATUSES.length - 1 && (
+              <div style={{ width: 14, height: 2, borderRadius: 2, background: i < idx ? statusInfo(STATUSES[i + 1].key).color : "#e7e2d6" }} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
+   App principal
+----------------------------------------------------------------- */
+export default function App() {
+  const [tab, setTab] = useState("nova"); // "nova" | "gestao"
+  const [requests, setRequests] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    const list = await storeList();
+    list.sort((a, b) => b.createdAt - a.createdAt);
+    setRequests(list);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  return (
+    <div className="mnt-root" style={{ width: "100%", minHeight: "100vh" }}>
+      <style>{CSS}</style>
+
+      {/* Cabeçalho */}
+      <header style={{ borderBottom: "2px solid #1c1917", background: "#f0ece1" }}>
+        <div style={{ maxWidth: 920, margin: "0 auto", padding: "22px 20px 0" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 42, height: 42, background: "#d9480f", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", flexShrink: 0 }}>
+              <Wrench size={22} strokeWidth={2.4} />
+            </div>
+            <div>
+              <div className="mnt-mono" style={{ fontSize: 11, letterSpacing: 2, color: "#d9480f", fontWeight: 700 }}>ORDENS DE SERVIÇO</div>
+              <h1 className="mnt-display" style={{ margin: 0, fontSize: 26, fontWeight: 800, lineHeight: 1.05, letterSpacing: -.5 }}>
+                Solicitação de Manutenção
+              </h1>
+            </div>
+          </div>
+
+          {/* Abas */}
+          <div style={{ display: "flex", gap: 26, marginTop: 18 }}>
+            {[
+              { k: "nova", label: "Nova solicitação", icon: Plus },
+              { k: "gestao", label: "Painel de gestão", icon: ClipboardList },
+            ].map((t) => {
+              const active = tab === t.k;
+              const Icon = t.icon;
+              return (
+                <button
+                  key={t.k}
+                  className="mnt-btn mnt-tab"
+                  onClick={() => setTab(t.k)}
+                  style={{
+                    background: "none", padding: "10px 2px 12px", display: "flex",
+                    alignItems: "center", gap: 7, fontSize: 14, fontWeight: 600,
+                    color: active ? "#1c1917" : "#8c8678",
+                    borderBottom: active ? "3px solid #d9480f" : "3px solid transparent",
+                  }}
+                >
+                  <Icon size={16} /> {t.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </header>
+
+      <main style={{ maxWidth: 920, margin: "0 auto", padding: "26px 20px 60px" }}>
+        {tab === "nova"
+          ? <NovaSolicitacao onCreated={reload} />
+          : <Gestao requests={requests} loading={loading} reload={reload} />}
+      </main>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
+   Tela: Nova solicitação
+----------------------------------------------------------------- */
+function NovaSolicitacao({ onCreated }) {
+  const [nome, setNome] = useState("");
+  const [setor, setSetor] = useState("");
+  const [descricao, setDescricao] = useState("");
+  const [sending, setSending] = useState(false);
+  const [done, setDone] = useState(null); // protocolo gerado
+
+  const submit = async () => {
+    if (!nome.trim() || !setor.trim() || !descricao.trim()) return;
+    setSending(true);
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const protocolo = "OS-" + id.slice(-5).toUpperCase();
+    const now = Date.now();
+    const obj = {
+      id, protocolo,
+      nome: nome.trim(), setor: setor.trim(), descricao: descricao.trim(),
+      status: "recebido", prazo: "", createdAt: now, updatedAt: now,
+      historico: [{ status: "recebido", at: now }],
+    };
+    await storeSet(id, obj);
+    setSending(false);
+    setDone(protocolo);
+    setNome(""); setSetor(""); setDescricao("");
+    onCreated();
+  };
+
+  if (done) {
+    return (
+      <div className="mnt-card" style={{ background: "#fff", border: "2px solid #15803d", borderRadius: 16, padding: 34, textAlign: "center", maxWidth: 520, margin: "10px auto" }}>
+        <div style={{ width: 56, height: 56, borderRadius: 999, background: "#15803d18", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}>
+          <CheckCircle2 size={32} color="#15803d" />
+        </div>
+        <h2 className="mnt-display" style={{ margin: "0 0 6px", fontSize: 22, fontWeight: 800 }}>Solicitação registrada!</h2>
+        <p style={{ margin: "0 0 16px", color: "#6b6b6b", fontSize: 14 }}>Guarde seu número de protocolo para acompanhamento.</p>
+        <div className="mnt-mono" style={{ display: "inline-block", background: "#f0ece1", border: "1.5px dashed #c9c2b2", borderRadius: 10, padding: "10px 20px", fontSize: 22, fontWeight: 700, letterSpacing: 1 }}>
+          {done}
+        </div>
+        <div>
+          <button className="mnt-btn" onClick={() => setDone(null)} style={{ marginTop: 22, background: "#1c1917", color: "#fff", borderRadius: 9, padding: "11px 20px", fontSize: 14, fontWeight: 600 }}>
+            Enviar outra solicitação
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const Label = ({ icon: Icon, children }) => (
+    <label className="mnt-mono" style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, letterSpacing: 1, color: "#6b6b6b", marginBottom: 7, textTransform: "uppercase" }}>
+      <Icon size={13} /> {children}
+    </label>
+  );
+
+  return (
+    <div className="mnt-card" style={{ background: "#fff", border: "2px solid #1c1917", borderRadius: 16, padding: 26, maxWidth: 560, margin: "0 auto" }}>
+      <p style={{ margin: "0 0 22px", color: "#6b6b6b", fontSize: 14, lineHeight: 1.5 }}>
+        Descreva o problema e preencha seus dados. Você receberá um número de protocolo para acompanhar o andamento.
+      </p>
+
+      <div style={{ marginBottom: 16 }}>
+        <Label icon={User}>Nome do solicitante</Label>
+        <input className="mnt-input" value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Ex.: Maria Souza" />
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <Label icon={Building2}>Setor</Label>
+        <input className="mnt-input" value={setor} onChange={(e) => setSetor(e.target.value)} placeholder="Ex.: Recepção / 2º andar" />
+      </div>
+      <div style={{ marginBottom: 22 }}>
+        <Label icon={FileText}>Descrição do problema</Label>
+        <textarea className="mnt-input" rows={4} value={descricao} onChange={(e) => setDescricao(e.target.value)} placeholder="Descreva o que precisa de manutenção, local exato, urgência, etc." style={{ resize: "vertical" }} />
+      </div>
+
+      <button
+        className="mnt-btn"
+        onClick={submit}
+        disabled={sending || !nome.trim() || !setor.trim() || !descricao.trim()}
+        style={{
+          width: "100%", background: "#d9480f", color: "#fff", borderRadius: 10,
+          padding: "14px", fontSize: 15, fontWeight: 700, display: "flex",
+          alignItems: "center", justifyContent: "center", gap: 8,
+          opacity: (sending || !nome.trim() || !setor.trim() || !descricao.trim()) ? .5 : 1,
+        }}
+      >
+        {sending ? "Enviando..." : <>Enviar solicitação <ArrowRight size={17} /></>}
+      </button>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
+   Tela: Painel de gestão
+----------------------------------------------------------------- */
+function Gestao({ requests, loading, reload }) {
+  const [unlocked, setUnlocked] = useState(false);
+  const [code, setCode] = useState("");
+  const [err, setErr] = useState(false);
+  const [filter, setFilter] = useState("todos");
+  const [query, setQuery] = useState("");
+
+  const counts = useMemo(() => {
+    const c = {};
+    STATUSES.forEach((s) => (c[s.key] = 0));
+    requests.forEach((r) => (c[r.status] = (c[r.status] || 0) + 1));
+    return c;
+  }, [requests]);
+
+  const filtered = useMemo(() => {
+    return requests.filter((r) => {
+      if (filter !== "todos" && r.status !== filter) return false;
+      if (query.trim()) {
+        const q = query.toLowerCase();
+        return (r.nome + r.setor + r.descricao + r.protocolo).toLowerCase().includes(q);
+      }
+      return true;
+    });
+  }, [requests, filter, query]);
+
+  if (!unlocked) {
+    return (
+      <div className="mnt-card" style={{ background: "#fff", border: "2px solid #1c1917", borderRadius: 16, padding: 32, maxWidth: 380, margin: "20px auto", textAlign: "center" }}>
+        <div style={{ width: 50, height: 50, borderRadius: 12, background: "#1c1917", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px" }}>
+          <Lock size={24} color="#fff" />
+        </div>
+        <h2 className="mnt-display" style={{ margin: "0 0 6px", fontSize: 20, fontWeight: 800 }}>Acesso restrito</h2>
+        <p style={{ margin: "0 0 18px", color: "#6b6b6b", fontSize: 13.5 }}>Digite o código para gerenciar as solicitações.</p>
+        <input
+          className="mnt-input mnt-mono"
+          value={code}
+          onChange={(e) => { setCode(e.target.value); setErr(false); }}
+          onKeyDown={(e) => e.key === "Enter" && (code === ACCESS_CODE ? setUnlocked(true) : setErr(true))}
+          placeholder="••••"
+          style={{ textAlign: "center", fontSize: 20, letterSpacing: 6, borderColor: err ? "#dc2626" : undefined }}
+        />
+        {err && <div style={{ color: "#dc2626", fontSize: 12.5, marginTop: 8 }}>Código incorreto.</div>}
+        <button
+          className="mnt-btn"
+          onClick={() => (code === ACCESS_CODE ? setUnlocked(true) : setErr(true))}
+          style={{ width: "100%", marginTop: 16, background: "#d9480f", color: "#fff", borderRadius: 9, padding: "12px", fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}
+        >
+          <Unlock size={16} /> Entrar
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {/* Resumo por status */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+        <button
+          className="mnt-btn mnt-chip"
+          onClick={() => setFilter("todos")}
+          style={chipStyle(filter === "todos", "#1c1917")}
+        >
+          Todas <strong style={{ marginLeft: 5 }}>{requests.length}</strong>
+        </button>
+        {STATUSES.map((s) => (
+          <button
+            key={s.key}
+            className="mnt-btn mnt-chip"
+            onClick={() => setFilter(filter === s.key ? "todos" : s.key)}
+            style={chipStyle(filter === s.key, s.color)}
+          >
+            {s.label} <strong style={{ marginLeft: 5 }}>{counts[s.key] || 0}</strong>
+          </button>
+        ))}
+      </div>
+
+      {/* Busca */}
+      <div style={{ position: "relative", marginBottom: 20 }}>
+        <Search size={16} color="#a8a297" style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)" }} />
+        <input
+          className="mnt-input"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Buscar por nome, setor, protocolo ou descrição..."
+          style={{ paddingLeft: 38 }}
+        />
+      </div>
+
+      {loading ? (
+        <Empty text="Carregando solicitações..." />
+      ) : filtered.length === 0 ? (
+        <Empty text={requests.length === 0 ? "Nenhuma solicitação ainda. Elas aparecerão aqui assim que forem enviadas." : "Nenhuma solicitação com esse filtro."} />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {filtered.map((r, i) => (
+            <RequestCard key={r.id} req={r} reload={reload} delay={i * 0.04} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function chipStyle(active, color) {
+  return {
+    background: active ? color : "#fff",
+    color: active ? "#fff" : "#3f3f46",
+    border: `1.5px solid ${active ? color : "#d8d2c4"}`,
+    borderRadius: 999, padding: "7px 14px", fontSize: 12.5, fontWeight: 500,
+  };
+}
+
+function Empty({ text }) {
+  return (
+    <div style={{ textAlign: "center", padding: "50px 20px", color: "#a8a297" }}>
+      <AlertCircle size={30} style={{ marginBottom: 10 }} />
+      <p style={{ margin: 0, fontSize: 14 }}>{text}</p>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
+   Card de solicitação (gestão)
+----------------------------------------------------------------- */
+function RequestCard({ req, reload, delay }) {
+  const [open, setOpen] = useState(false);
+  const [desc, setDesc] = useState(req.descricao);
+  const [prazo, setPrazo] = useState(req.prazo || "");
+  const [confirmDel, setConfirmDel] = useState(false);
+  const s = statusInfo(req.status);
+
+  const save = async (patch) => {
+    const updated = { ...req, ...patch, updatedAt: Date.now() };
+    await storeSet(req.id, updated);
+    reload();
+  };
+
+  const changeStatus = async (newStatus) => {
+    if (newStatus === req.status) return;
+    const historico = [...(req.historico || []), { status: newStatus, at: Date.now() }];
+    await save({ status: newStatus, historico });
+  };
+
+  const fmt = (ts) => new Date(ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+  const fmtFull = (ts) => new Date(ts).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+  const prazoInfo = useMemo(() => {
+    if (!req.prazo) return null;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const d = new Date(req.prazo + "T00:00:00");
+    const diff = Math.round((d - today) / 86400000);
+    if (req.status === "finalizado") return { txt: "Concluído", color: "#15803d" };
+    if (diff < 0) return { txt: `Atrasado ${Math.abs(diff)}d`, color: "#dc2626" };
+    if (diff === 0) return { txt: "Vence hoje", color: "#d9480f" };
+    return { txt: `Faltam ${diff}d`, color: "#6b6b6b" };
+  }, [req.prazo, req.status]);
+
+  return (
+    <div className="mnt-card" style={{ background: "#fff", border: "1.5px solid #e0dccf", borderLeft: `5px solid ${s.color}`, borderRadius: 14, padding: 18, animationDelay: `${delay}s` }}>
+      {/* Topo */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 240px", minWidth: 0 }}>
+          <div className="mnt-mono" style={{ fontSize: 11, fontWeight: 700, color: s.color, display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}>
+            <Hash size={12} />{req.protocolo}
+            <span style={{ color: "#bcb6a8", fontWeight: 500 }}>· {fmt(req.createdAt)}</span>
+          </div>
+          <div className="mnt-display" style={{ fontSize: 17, fontWeight: 700, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <User size={15} color="#6b6b6b" />{req.nome}
+            <span style={{ fontSize: 13, fontWeight: 500, color: "#8c8678", display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <Building2 size={13} />{req.setor}
+            </span>
+          </div>
+        </div>
+        <StatusBadge status={req.status} />
+      </div>
+
+      {/* Descrição */}
+      <p style={{ margin: "12px 0", fontSize: 14, color: "#3f3f46", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{req.descricao}</p>
+
+      {/* Stepper */}
+      <div style={{ margin: "14px 0" }}><Stepper status={req.status} /></div>
+
+      {/* Ações de status */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
+        {STATUSES.map((st) => {
+          const active = st.key === req.status;
+          return (
+            <button
+              key={st.key}
+              className="mnt-btn mnt-statusbtn"
+              onClick={() => changeStatus(st.key)}
+              style={{
+                background: active ? st.color : st.color + "14",
+                color: active ? "#fff" : st.color,
+                border: `1px solid ${st.color}${active ? "" : "33"}`,
+                borderRadius: 8, padding: "6px 11px", fontSize: 12, fontWeight: 600,
+              }}
+            >
+              {st.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Prazo + detalhes */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 14, paddingTop: 14, borderTop: "1px dashed #e0dccf" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          <Calendar size={15} color="#6b6b6b" />
+          <span className="mnt-mono" style={{ fontSize: 11, fontWeight: 700, color: "#6b6b6b", letterSpacing: .5 }}>PRAZO</span>
+          <input
+            type="date"
+            className="mnt-input mnt-mono"
+            value={prazo}
+            onChange={(e) => { setPrazo(e.target.value); save({ prazo: e.target.value }); }}
+            style={{ width: "auto", padding: "6px 9px", fontSize: 13 }}
+          />
+          {prazoInfo && (
+            <span style={{ fontSize: 12, fontWeight: 700, color: prazoInfo.color, background: prazoInfo.color + "15", borderRadius: 6, padding: "3px 8px" }}>
+              {prazoInfo.txt}
+            </span>
+          )}
+        </div>
+        <div style={{ flex: 1 }} />
+        <button className="mnt-btn mnt-link" onClick={() => setOpen(!open)} style={{ background: "none", color: "#6b6b6b", fontSize: 12.5, fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+          {open ? "Ocultar" : "Detalhes"} <ChevronRight size={14} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .2s" }} />
+        </button>
+        <button className="mnt-btn" onClick={() => setConfirmDel(true)} style={{ background: "none", color: "#c2410c" }} title="Excluir">
+          <Trash2 size={16} />
+        </button>
+      </div>
+
+      {/* Detalhes: edição de descrição + histórico */}
+      {open && (
+        <div style={{ marginTop: 14, animation: "pop .2s ease" }}>
+          <div className="mnt-mono" style={{ fontSize: 11, fontWeight: 700, color: "#6b6b6b", letterSpacing: 1, marginBottom: 6, textTransform: "uppercase" }}>Editar descrição</div>
+          <textarea className="mnt-input" rows={3} value={desc} onChange={(e) => setDesc(e.target.value)} style={{ resize: "vertical" }} />
+          <button
+            className="mnt-btn"
+            onClick={() => save({ descricao: desc })}
+            disabled={desc === req.descricao}
+            style={{ marginTop: 8, background: "#1c1917", color: "#fff", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 600, opacity: desc === req.descricao ? .4 : 1 }}
+          >
+            Salvar descrição
+          </button>
+
+          <div className="mnt-mono" style={{ fontSize: 11, fontWeight: 700, color: "#6b6b6b", letterSpacing: 1, margin: "16px 0 8px", textTransform: "uppercase" }}>Histórico</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {(req.historico || []).slice().reverse().map((h, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#6b6b6b" }}>
+                <Clock size={13} />
+                <span className="mnt-mono" style={{ color: "#a8a297" }}>{fmtFull(h.at)}</span>
+                <ChevronRight size={12} color="#cbc5b6" />
+                <StatusBadge status={h.status} small />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Confirmação de exclusão */}
+      {confirmDel && (
+        <div style={{ marginTop: 12, background: "#fef2f2", border: "1.5px solid #fecaca", borderRadius: 10, padding: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", animation: "pop .2s ease" }}>
+          <span style={{ fontSize: 13, color: "#991b1b", fontWeight: 500 }}>Excluir esta solicitação permanentemente?</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="mnt-btn" onClick={() => setConfirmDel(false)} style={{ background: "#fff", border: "1px solid #d8d2c4", borderRadius: 7, padding: "6px 12px", fontSize: 13, fontWeight: 600 }}>Cancelar</button>
+            <button className="mnt-btn" onClick={async () => { await storeDel(req.id); reload(); }} style={{ background: "#dc2626", color: "#fff", borderRadius: 7, padding: "6px 12px", fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
+              <X size={14} /> Excluir
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
