@@ -143,6 +143,12 @@ const PRIORIDADES = [
 const pInfo = (k)=> PRIORIDADES.find(p=>p.key===k) || PRIORIDADES[1];
 const CATEGORIAS = ["Elétrica","Hidráulica","Climatização","Mobiliário","TI / Equipamentos","Estrutura / Alvenaria","Limpeza","Outros"];
 
+function isOverdue(r){
+  if(!r.prazo || r.status==="finalizado" || r.arquivado) return false;
+  const today=new Date(); today.setHours(0,0,0,0);
+  return new Date(r.prazo+"T00:00:00") < today;
+}
+
 /* ---------------- Notificações por e-mail (opcional, via EmailJS) ---------------- */
 const EMAIL_ON = !!(window.EMAILJS_PUBLIC_KEY && window.EMAILJS_SERVICE_ID && window.emailjs);
 if(EMAIL_ON){ try{ emailjs.init({publicKey: window.EMAILJS_PUBLIC_KEY}); }catch(e){ console.error(e); } }
@@ -166,7 +172,8 @@ function fromRow(r){
   return { id:r.id, protocolo:r.protocolo, nome:r.nome, setor:r.setor, descricao:r.descricao,
     status:r.status, prazo:r.prazo||"", createdAt:Number(r.created_at), updatedAt:Number(r.updated_at),
     historico: Array.isArray(r.historico) ? r.historico : [],
-    prioridade:r.prioridade||"media", categoria:r.categoria||"", contato:r.contato||"", arquivado:!!r.arquivado };
+    prioridade:r.prioridade||"media", categoria:r.categoria||"", contato:r.contato||"", arquivado:!!r.arquivado,
+    motivoAtraso:r.motivo_atraso||"" };
 }
 async function dbList(){
   const { data, error } = await db.from(TABLE).select("*").order("created_at",{ascending:false});
@@ -189,6 +196,7 @@ async function dbUpdate(id, patch){
   if("categoria" in patch) row.categoria = patch.categoria;
   if("contato" in patch) row.contato = patch.contato;
   if("arquivado" in patch) row.arquivado = patch.arquivado;
+  if("motivoAtraso" in patch) row.motivo_atraso = patch.motivoAtraso;
   const { error } = await db.from(TABLE).update(row).eq("id", id);
   if(error) throw error;
 }
@@ -474,6 +482,11 @@ function Acompanhar(){
             <span style={{fontSize:13,fontWeight:600}}>{fmt(new Date(res.prazo+"T00:00:00").getTime())}</span>
             {prazoInfo && <span style={{fontSize:12,fontWeight:700,color:prazoInfo.color,background:(prazoInfo.color.startsWith("#")?prazoInfo.color+"15":"#f1ede3"),borderRadius:6,padding:"3px 8px"}}>{prazoInfo.txt}</span>}
           </div>}
+          {res.motivoAtraso && <div style={{marginTop:12,background:"#fff7ed",border:"1px solid #fed7aa",borderRadius:8,padding:"11px 13px"}}>
+            <div className="label" style={{color:"#c2410c",marginBottom:5}}><Icon name="alert" size={13}/> Motivo do atraso</div>
+            <p style={{margin:0,fontSize:13.5,color:"#7c2d12",lineHeight:1.5,whiteSpace:"pre-wrap"}}>{res.motivoAtraso}</p>
+            {res.prazo && <div style={{fontSize:12.5,color:"#9a3412",marginTop:7}}>Nova previsão de conclusão: <strong>{fmt(new Date(res.prazo+"T00:00:00").getTime())}</strong></div>}
+          </div>}
           <div className="label" style={{margin:"16px 0 8px"}}>Andamento</div>
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
             {(res.historico||[]).slice().reverse().map((h,i)=>(
@@ -498,8 +511,10 @@ function Gestao({requests,loading,reload}){
   const counts = useMemo(()=>{ const c={arquivadas:0}; STATUSES.forEach(s=>c[s.key]=0);
     requests.forEach(r=>{ if(r.arquivado){ c.arquivadas++; } else { c[r.status]=(c[r.status]||0)+1; } }); return c; },[requests]);
   const ativasTotal = useMemo(()=>requests.filter(r=>!r.arquivado).length,[requests]);
+  const atrasadasCount = useMemo(()=>requests.filter(isOverdue).length,[requests]);
   const filtered = useMemo(()=>requests.filter(r=>{
     if(filter==="arquivadas"){ if(!r.arquivado) return false; }
+    else if(filter==="atrasadas"){ if(!isOverdue(r)) return false; }
     else { if(r.arquivado) return false; if(filter!=="todos" && r.status!==filter) return false; }
     if(query.trim()){ const q=query.toLowerCase(); return (r.nome+r.setor+r.descricao+r.protocolo).toLowerCase().includes(q); }
     return true; }),[requests,filter,query]);
@@ -536,6 +551,9 @@ function Gestao({requests,loading,reload}){
           <button key={s.key} className="chip" onClick={()=>setFilter(filter===s.key?"todos":s.key)}
             style={filter===s.key?{background:s.color,color:"#fff",borderColor:s.color}:undefined}>
             {s.label} <strong style={{marginLeft:5}}>{counts[s.key]||0}</strong></button>))}
+        {atrasadasCount>0 && <button className="chip" onClick={()=>setFilter(filter==="atrasadas"?"todos":"atrasadas")}
+          style={filter==="atrasadas"?{background:"#dc2626",color:"#fff",borderColor:"#dc2626"}:{borderColor:"#fecaca",color:"#dc2626"}}>
+          <Icon name="alert" size={13} style={{marginRight:5}}/> Atrasadas <strong style={{marginLeft:5}}>{atrasadasCount}</strong></button>}
         <button className="chip" onClick={()=>setFilter(filter==="arquivadas"?"todos":"arquivadas")}
           style={filter==="arquivadas"?{background:"#44413c",color:"#fff",borderColor:"#44413c"}:undefined}>
           <Icon name="archive" size={13} style={{marginRight:5}}/> Arquivadas <strong style={{marginLeft:5}}>{counts.arquivadas||0}</strong></button>
@@ -565,8 +583,10 @@ function RequestCard({req,reload,delay}){
   const [open,setOpen]=useState(false);
   const [desc,setDesc]=useState(req.descricao);
   const [prazo,setPrazo]=useState(req.prazo||"");
+  const [motivo,setMotivo]=useState(req.motivoAtraso||"");
   const [confirmDel,setConfirmDel]=useState(false);
   const s = sInfo(req.status);
+  const atrasado = isOverdue(req);
 
   const save = async (patch)=>{ try{ await dbUpdate(req.id,{...patch,updatedAt:Date.now()}); reload(); }catch(e){ console.error(e); } };
   const changeStatus = async (ns)=>{ if(ns===req.status) return; const historico=[...(req.historico||[]),{status:ns,at:Date.now()}]; await save({status:ns,historico}); notifyStatus(req, ns); };
@@ -632,6 +652,18 @@ function RequestCard({req,reload,delay}){
           {open?"Ocultar":"Detalhes"} <Icon name="chevron" size={14} style={{transform:open?"rotate(90deg)":"none",transition:"transform .2s"}}/></button>
         <button className="iconbtn" onClick={()=>setConfirmDel(true)} style={{color:"#c2410c"}} title="Excluir"><Icon name="trash" size={16}/></button>
       </div>
+
+      {(atrasado || (req.motivoAtraso && req.motivoAtraso.length>0)) && (
+        <div style={{marginTop:12,background:atrasado?"#fff7ed":"#faf8f3",border:`1px solid ${atrasado?"#fed7aa":"var(--line-2)"}`,borderRadius:8,padding:"11px 13px"}}>
+          <label className="label" style={{color:atrasado?"#c2410c":"var(--muted)",marginBottom:6}}>
+            <Icon name="alert" size={13}/> Motivo do atraso <span style={{textTransform:"none",letterSpacing:0,fontWeight:500,color:"var(--faint)"}}>(visível ao solicitante)</span>
+          </label>
+          <textarea className="textarea" rows={2} value={motivo} onChange={e=>setMotivo(e.target.value)}
+            onBlur={()=>{ if(motivo!==(req.motivoAtraso||"")) save({motivoAtraso:motivo.trim()}); }}
+            placeholder="Ex.: Aguardando peça de reposição. Nova previsão informada no campo de prazo acima." style={{resize:"vertical"}}/>
+          <div style={{fontSize:11.5,color:"var(--faint)",marginTop:5}}>Atualize também a <strong>nova data</strong> no campo "Prazo" acima.</div>
+        </div>
+      )}
 
       {open && <div className="pop" style={{marginTop:14}}>
         <div className="label">Editar descrição</div>
